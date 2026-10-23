@@ -81,7 +81,7 @@ export class Auth2KmsRpcClient {
 
   private async postKmsRpc<T>(request: KmsRpcRequest): Promise<T> {
     const response = await this.kmsApi.postKmsRpc(request).catch((error: unknown) => {
-      throw formatKmsHttpError(error);
+      throw formatKmsHttpError(error, request.method);
     });
 
     // Surface JSON-RPC level errors (KMS returns HTTP 200 with error body).
@@ -157,26 +157,42 @@ export class Auth2KmsRpcClient {
 type KmsHttpResponse = {
   status: number;
   data: unknown;
+  headers: unknown;
 };
+
+// Edge/WAF blocks don't use the ErrorResponse shape, so we only trust ids that look like opaque identifiers.
+const SAFE_ID = /^[A-Za-z0-9-]{1,64}$/;
+
+function readSafeId(value: unknown): string | undefined {
+  return typeof value === "string" && SAFE_ID.test(value) ? value : undefined;
+}
+
+function readHeader(headers: unknown, name: string): unknown {
+  if (typeof headers !== "object" || headers === null) {
+    return undefined;
+  }
+  const h = headers as { get?: (key: string) => unknown } & Record<string, unknown>;
+  return typeof h.get === "function" ? h.get(name) : h[name];
+}
 
 function getHttpResponse(error: unknown): KmsHttpResponse | null {
   if (typeof error !== "object" || error === null || !("response" in error)) {
     return null;
   }
 
-  const response = (error as { response?: { status?: unknown; data?: unknown } }).response;
+  const response = (error as { response?: { status?: unknown; data?: unknown; headers?: unknown } }).response;
   if (!response || typeof response.status !== "number") {
     return null;
   }
 
-  return { status: response.status, data: response.data };
+  return { status: response.status, data: response.data, headers: response.headers };
 }
 
 /**
  * MCP returns only `error.message`. Keep ErrorResponse fields and drop request
  * headers, tokens, stamps, and the Axios config.
  */
-function formatKmsHttpError(error: unknown): unknown {
+function formatKmsHttpError(error: unknown, method: string): unknown {
   const response = getHttpResponse(error);
   if (!response) {
     return error;
@@ -192,14 +208,22 @@ function formatKmsHttpError(error: unknown): unknown {
     if (typeof body.requestId === "string" && body.requestId.length > 0) {
       requestId = body.requestId;
     }
+    // Edge blocks reply with { success, message, id } instead of ErrorResponse.
+    requestId ??= readSafeId((response.data as { id?: unknown }).id);
   }
+  const cfRay = readSafeId(readHeader(response.headers, "cf-ray"));
 
   let message = `KMS HTTP ${response.status}`;
   if (detail) {
     message += `: ${detail}`;
   }
+  message += ` (method=${method}`;
   if (requestId) {
-    message += ` (requestId=${requestId})`;
+    message += ` requestId=${requestId}`;
   }
+  if (cfRay) {
+    message += ` cf-ray=${cfRay}`;
+  }
+  message += ")";
   return new Error(message);
 }

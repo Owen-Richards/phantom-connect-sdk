@@ -438,7 +438,7 @@ describe("Auth2KmsRpcClient", () => {
 
       expect(thrown).toBeInstanceOf(Error);
       expect((thrown as Error).message).toBe(
-        "KMS HTTP 403: Policy violation: transaction not allowed (requestId=550e8400-e29b-41d4-a716-446655440000)",
+        "KMS HTTP 403: Policy violation: transaction not allowed (method=createWallet requestId=550e8400-e29b-41d4-a716-446655440000)",
       );
       expect((thrown as Error).message).not.toContain("secret-token");
       expect((thrown as Error).message).not.toContain("stamp-secret");
@@ -452,8 +452,54 @@ describe("Auth2KmsRpcClient", () => {
       const thrown = await client.createWallet(walletArgs).catch((error: unknown) => error);
 
       expect(thrown).toBeInstanceOf(Error);
-      expect((thrown as Error).message).toBe("KMS HTTP 500: Internal server error");
+      expect((thrown as Error).message).toBe("KMS HTTP 500: Internal server error (method=createWallet)");
       expect((thrown as Error).message).not.toMatch(/requestId=/);
+    });
+
+    it("falls back to the edge-block `id` and cf-ray header, and names the RPC method", async () => {
+      mockPostKmsRpc.mockRejectedValueOnce(
+        makeHttpError(
+          403,
+          { success: false, message: "error", id: "ca7bc294-d1a4-4036-8da2-233d51ca2039" },
+          {
+            response: {
+              status: 403,
+              data: { success: false, message: "error", id: "ca7bc294-d1a4-4036-8da2-233d51ca2039" },
+              headers: { "cf-ray": "8a1b2c3d4e5f6071-SJC" },
+            },
+          },
+        ),
+      );
+      const client = makeClient();
+
+      const thrown = await client
+        .getWalletWithTag({ organizationId: "org-abc", tag: "client-uuid" })
+        .catch((error: unknown) => error);
+
+      expect((thrown as Error).message).toBe(
+        "KMS HTTP 403 (method=getWalletWithTag requestId=ca7bc294-d1a4-4036-8da2-233d51ca2039 cf-ray=8a1b2c3d4e5f6071-SJC)",
+      );
+    });
+
+    it("ignores id and cf-ray values that are not plain identifiers", async () => {
+      mockPostKmsRpc.mockRejectedValueOnce(
+        makeHttpError(
+          403,
+          { id: "Bearer secret-token\nnext line" },
+          {
+            response: {
+              status: 403,
+              data: { id: "Bearer secret-token\nnext line" },
+              headers: { "cf-ray": "bad value" },
+            },
+          },
+        ),
+      );
+      const client = makeClient();
+
+      const thrown = await client.createWallet(walletArgs).catch((error: unknown) => error);
+
+      expect((thrown as Error).message).toBe("KMS HTTP 403 (method=createWallet)");
     });
 
     it("preserves a non-HTTP error without rewriting it", async () => {
